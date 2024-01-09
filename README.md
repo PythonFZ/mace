@@ -5,6 +5,7 @@
 [![License](https://img.shields.io/badge/License-MIT%202.0-blue.svg)](https://opensource.org/licenses/mit)
 [![GitHub issues](https://img.shields.io/github/issues/ACEsuit/mace.svg)](https://GitHub.com/ACEsuit/mace/issues/)
 [![Documentation Status](https://readthedocs.org/projects/mace/badge/)](https://mace-docs.readthedocs.io/en/latest/)
+[![PyPI version](https://badge.fury.io/py/mace-torch.svg)](https://badge.fury.io/py/mace-torch)
 
 ## Table of contents
 
