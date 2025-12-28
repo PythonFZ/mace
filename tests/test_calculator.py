@@ -762,6 +762,31 @@ def test_calculator_descriptor_grad(fitting_configs, trained_equivariant_model):
             atol=1e-6,
         )
 
+    # Test 5b: Same model with different positions (simulating optimization loop)
+    # This is crucial for iterative structure optimization use cases
+    at_rattled = at.copy()
+    prev_desc = None
+    for i in range(3):
+        at_rattled.rattle(stdev=0.05, seed=42 + i)
+        result_rattled = calc.get_descriptors(
+            at_rattled, invariants_only=True, return_tensors=True
+        )
+        desc_rattled = result_rattled["descriptors"]
+        pos_rattled = result_rattled["positions"]
+
+        # Verify we can compute gradients
+        grad_rattled = torch.autograd.grad(desc_rattled.sum(), pos_rattled)[0]
+        assert grad_rattled.shape == (num_atoms, 3)
+
+        # Verify descriptors change with positions
+        if prev_desc is not None:
+            assert not np.allclose(
+                desc_rattled.detach().cpu().numpy(),
+                prev_desc,
+                atol=1e-6,
+            ), "Descriptors should change when positions change"
+        prev_desc = desc_rattled.detach().cpu().numpy()
+
     # Test 6: Gradient computation with single layer
     result_single = calc.get_descriptors(
         at, invariants_only=True, num_layers=1, return_tensors=True
