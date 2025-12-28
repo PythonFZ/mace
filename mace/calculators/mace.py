@@ -10,7 +10,9 @@ import logging
 import os
 from glob import glob
 from pathlib import Path
-from typing import List, Union
+from typing import List, Literal, Optional, TypedDict, Union, overload
+
+import ase
 
 os.environ["TORCH_FORCE_NO_WEIGHTS_ONLY_LOAD"] = "1"
 
@@ -58,6 +60,13 @@ def get_model_dtype(model: torch.nn.Module) -> torch.dtype:
     if mode_dtype == torch.float32:
         return "float32"
     raise ValueError(f"Unknown dtype {mode_dtype}")
+
+
+class DescriptorsOutput(TypedDict):
+    """Return type for get_descriptors when return_tensors=True."""
+
+    descriptors: Union[torch.Tensor, List[torch.Tensor]]
+    positions: torch.Tensor
 
 
 class MACECalculator(Calculator):
@@ -565,9 +574,31 @@ class MACECalculator(Calculator):
             return hessians[0]
         return hessians
 
+    @overload
     def get_descriptors(
-        self, atoms=None, invariants_only=True, num_layers=-1, return_tensors=False
-    ):
+        self,
+        atoms: Optional[ase.Atoms] = None,
+        invariants_only: bool = True,
+        num_layers: int = -1,
+        return_tensors: Literal[False] = False,
+    ) -> Union[np.ndarray, List[np.ndarray]]: ...
+
+    @overload
+    def get_descriptors(
+        self,
+        atoms: Optional[ase.Atoms] = None,
+        invariants_only: bool = True,
+        num_layers: int = -1,
+        return_tensors: Literal[True] = ...,
+    ) -> DescriptorsOutput: ...
+
+    def get_descriptors(
+        self,
+        atoms: Optional[ase.Atoms] = None,
+        invariants_only: bool = True,
+        num_layers: int = -1,
+        return_tensors: bool = False,
+    ) -> Union[np.ndarray, List[np.ndarray], DescriptorsOutput]:
         """Extracts the descriptors from MACE model.
 
         :param atoms: ase.Atoms object
@@ -645,7 +676,6 @@ class MACECalculator(Calculator):
                 "positions": batch["positions"],
             }
 
-        # Default: return numpy arrays (backward compatible)
         descriptors = [
             descriptor.detach().cpu().numpy() for descriptor in descriptors
         ]
