@@ -565,12 +565,25 @@ class MACECalculator(Calculator):
             return hessians[0]
         return hessians
 
-    def get_descriptors(self, atoms=None, invariants_only=True, num_layers=-1):
+    def get_descriptors(
+        self, atoms=None, invariants_only=True, num_layers=-1, return_tensors=False
+    ):
         """Extracts the descriptors from MACE model.
+
         :param atoms: ase.Atoms object
         :param invariants_only: bool, if True only the invariant descriptors are returned
         :param num_layers: int, number of layers to extract descriptors from, if -1 all layers are used
-        :return: np.ndarray (num_atoms, num_interactions, invariant_features) of invariant descriptors if num_models is 1 or list[np.ndarray] otherwise
+        :param return_tensors: bool, if True returns torch tensors with computation graph attached
+                              for gradient computation, otherwise returns numpy arrays
+        :return: if return_tensors is False:
+                    np.ndarray (num_atoms, num_features) if num_models is 1 or list[np.ndarray] otherwise
+                 if return_tensors is True:
+                    dict with keys:
+                        - "descriptors": torch.Tensor (num_atoms, num_features) if num_models is 1,
+                                        or list[torch.Tensor] otherwise
+                        - "positions": torch.Tensor (num_atoms, 3) with requires_grad=True
+                    The descriptors are connected to positions in the computation graph, allowing
+                    gradient computation via torch.autograd.grad() or .backward()
         """
         if atoms is None and self.atoms is None:
             raise ValueError("atoms not set")
@@ -581,8 +594,23 @@ class MACECalculator(Calculator):
         num_interactions = int(self.models[0].num_interactions)
         if num_layers == -1:
             num_layers = num_interactions
+
         batch = self._atoms_to_batch(atoms)
-        descriptors = [model(batch.to_dict())["node_feats"] for model in self.models]
+
+        # Enable gradient tracking on positions if returning tensors
+        if return_tensors:
+            batch["positions"].requires_grad_(True)
+
+        # When returning tensors for gradient computation, disable force computation
+        # to preserve the autograd graph
+        descriptors = [
+            model(
+                batch.to_dict(),
+                compute_force=not return_tensors,
+                compute_stress=False,
+            )["node_feats"]
+            for model in self.models
+        ]
 
         irreps_out = o3.Irreps(str(self.models[0].products[0].linear.irreps_out))
         l_max = irreps_out.lmax
@@ -603,8 +631,23 @@ class MACECalculator(Calculator):
                 for descriptor in descriptors
             ]
         to_keep = np.sum(per_layer_features[:num_layers])
+        descriptors = [descriptor[:, :to_keep] for descriptor in descriptors]
+
+        if return_tensors:
+            # Return tensors with computation graph for gradient computation
+            if self.num_models == 1:
+                return {
+                    "descriptors": descriptors[0],
+                    "positions": batch["positions"],
+                }
+            return {
+                "descriptors": descriptors,
+                "positions": batch["positions"],
+            }
+
+        # Default: return numpy arrays (backward compatible)
         descriptors = [
-            descriptor[:, :to_keep].detach().cpu().numpy() for descriptor in descriptors
+            descriptor.detach().cpu().numpy() for descriptor in descriptors
         ]
 
         if self.num_models == 1:

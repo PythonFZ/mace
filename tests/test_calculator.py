@@ -688,6 +688,167 @@ def test_calculator_descriptor(fitting_configs, trained_equivariant_model):
     assert not np.allclose(desc, desc_rotated, atol=1e-6)
 
 
+def test_calculator_descriptor_grad(fitting_configs, trained_equivariant_model):
+    """Test computing gradients of descriptors w.r.t. atomic positions.
+
+    This test verifies that:
+    1. Descriptors can be returned as tensors with gradient computation enabled
+    2. Gradients can be computed using torch.autograd.grad()
+    3. Multiple gradient computations can be performed on the same graph
+    4. Gradients are numerically accurate (finite difference validation)
+    """
+    at = fitting_configs[2].copy()
+    calc = trained_equivariant_model
+    num_atoms = len(at)
+
+    # Test 1: Basic tensor return with invariants
+    result = calc.get_descriptors(at, invariants_only=True, return_tensors=True)
+
+    assert "descriptors" in result
+    assert "positions" in result
+    descriptors = result["descriptors"]
+    positions = result["positions"]
+
+    assert isinstance(descriptors, torch.Tensor)
+    assert isinstance(positions, torch.Tensor)
+    assert descriptors.shape[0] == num_atoms
+    assert descriptors.shape[1] == 32  # 16 features per layer * 2 layers
+    assert positions.shape == (num_atoms, 3)
+    assert positions.requires_grad
+
+    # Test 2: Compute gradients using torch.autograd.grad
+    # Gradient of sum of all descriptors w.r.t. positions
+    grad = torch.autograd.grad(
+        descriptors.sum(),
+        positions,
+        create_graph=False,
+        retain_graph=True,
+    )[0]
+    assert grad.shape == (num_atoms, 3)
+
+    # Test 3: Multiple gradient computations on the same graph
+    # This is crucial for iterative optimization use cases
+    for _ in range(3):
+        grad2 = torch.autograd.grad(
+            descriptors.sum(),
+            positions,
+            create_graph=False,
+            retain_graph=True,
+        )[0]
+        np.testing.assert_allclose(
+            grad2.detach().cpu().numpy(),
+            grad.detach().cpu().numpy(),
+            atol=1e-6,
+        )
+
+    # Test 4: Compute per-feature gradients
+    grad_per_feature = torch.autograd.grad(
+        descriptors[:, 0].sum(),  # First feature only
+        positions,
+        create_graph=False,
+        retain_graph=True,
+    )[0]
+    assert grad_per_feature.shape == (num_atoms, 3)
+
+    # Test 5: Multiple independent calls (new graph each time)
+    for _ in range(3):
+        result2 = calc.get_descriptors(at, invariants_only=True, return_tensors=True)
+        desc2 = result2["descriptors"]
+        pos2 = result2["positions"]
+        grad3 = torch.autograd.grad(desc2.sum(), pos2)[0]
+        np.testing.assert_allclose(
+            grad3.detach().cpu().numpy(),
+            grad.detach().cpu().numpy(),
+            atol=1e-6,
+        )
+
+    # Test 6: Gradient computation with single layer
+    result_single = calc.get_descriptors(
+        at, invariants_only=True, num_layers=1, return_tensors=True
+    )
+    assert result_single["descriptors"].shape == (num_atoms, 16)
+
+    # Test 7: Full (non-invariant) descriptors
+    result_full = calc.get_descriptors(at, invariants_only=False, return_tensors=True)
+    assert result_full["descriptors"].shape[0] == num_atoms
+    assert result_full["descriptors"].shape[1] == 80  # Full descriptors
+
+    # Test 8: Numerical gradient validation using finite differences
+    epsilon = 1e-4
+    test_feature_idx = 0
+
+    # Compute analytical gradient for feature 0
+    result_test = calc.get_descriptors(at, invariants_only=True, return_tensors=True)
+    analytical_grad = torch.autograd.grad(
+        result_test["descriptors"][:, test_feature_idx].sum(),
+        result_test["positions"],
+    )[0]
+    analytical_grad = analytical_grad.detach().cpu().numpy()
+
+    for test_pos_atom in range(num_atoms):
+        for test_pos_dim in range(3):
+            # Compute finite difference gradient
+            at_plus = at.copy()
+            at_minus = at.copy()
+            pos_plus = at_plus.get_positions()
+            pos_minus = at_minus.get_positions()
+            pos_plus[test_pos_atom, test_pos_dim] += epsilon
+            pos_minus[test_pos_atom, test_pos_dim] -= epsilon
+            at_plus.set_positions(pos_plus)
+            at_minus.set_positions(pos_minus)
+
+            desc_plus = calc.get_descriptors(at_plus, invariants_only=True)
+            desc_minus = calc.get_descriptors(at_minus, invariants_only=True)
+
+            numerical_grad = (
+                desc_plus[:, test_feature_idx].sum()
+                - desc_minus[:, test_feature_idx].sum()
+            ) / (2 * epsilon)
+
+            np.testing.assert_allclose(
+                analytical_grad[test_pos_atom, test_pos_dim],
+                numerical_grad,
+                rtol=1e-3,
+                atol=1e-5,
+                err_msg=f"Gradient mismatch at pos_atom={test_pos_atom}, pos_dim={test_pos_dim}",
+            )
+
+
+def test_calculator_descriptor_grad_committee(fitting_configs, trained_committee):
+    """Test descriptor gradients with committee models."""
+    at = fitting_configs[2].copy()
+    calc = trained_committee
+    num_atoms = len(at)
+
+    # Committee model should return lists of descriptors
+    result = calc.get_descriptors(at, invariants_only=True, return_tensors=True)
+
+    assert isinstance(result["descriptors"], list)
+    assert len(result["descriptors"]) == calc.num_models
+    positions = result["positions"]
+
+    for i in range(calc.num_models):
+        desc = result["descriptors"][i]
+        assert desc.shape[0] == num_atoms
+        # Compute gradient for each model
+        grad = torch.autograd.grad(
+            desc.sum(),
+            positions,
+            retain_graph=True,
+        )[0]
+        assert grad.shape == (num_atoms, 3)
+
+    # Multiple gradient computations should work
+    for _ in range(2):
+        result2 = calc.get_descriptors(at, invariants_only=True, return_tensors=True)
+        for i in range(calc.num_models):
+            np.testing.assert_allclose(
+                result2["descriptors"][i].detach().cpu().numpy(),
+                result["descriptors"][i].detach().cpu().numpy(),
+                atol=1e-6,
+            )
+
+
 @pytest.mark.skipif(not CUET_AVAILABLE, reason="cuequivariance not installed")
 def test_calculator_descriptor_cueq(fitting_configs, trained_equivariant_model_cueq):
     at = fitting_configs[2].copy()
